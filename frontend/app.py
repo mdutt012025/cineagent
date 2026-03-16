@@ -4,9 +4,9 @@
 import streamlit as st
 import requests
 import random
+import os
 
-API_URL = "http://localhost:8000"
-
+API_URL = os.environ.get("API_URL", "http://localhost:8000")
 st.set_page_config(
     page_title="CineAgent — Your Personal Film Oracle",
     page_icon="🎬",
