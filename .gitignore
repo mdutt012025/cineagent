@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Environment
+.env
+.env.*
+venv/
+env/
+
+# Model artifacts (too large for git — regenerate with setup scripts)
+model_artifacts/*.parquet
+model_artifacts/*.joblib
+model_artifacts/*.npy
+model_artifacts/*.index
+
+# OS
+.DS_Store
+Thumbs.db
