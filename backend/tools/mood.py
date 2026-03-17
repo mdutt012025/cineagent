@@ -5,7 +5,9 @@
 
 import re
 import json
+import time as _time
 import pandas as pd
+import numpy as np
 from groq import Groq
 
 from .shared import (
@@ -15,7 +17,16 @@ from .shared import (
     get_era_range,
 )
 
-# Valid genres in dataset — Groq must pick from these only
+# ── Shared Groq client ────────────────────────────────────────────────────────
+_groq_client = None
+def _get_groq():
+    global _groq_client
+    if _groq_client is None:
+        _groq_client = Groq(api_key=GROQ_API_KEY)
+    return _groq_client
+
+
+# ── Valid genres ──────────────────────────────────────────────────────────────
 VALID_GENRES = {
     'Action', 'Adventure', 'Animation', 'Comedy', 'Crime',
     'Documentary', 'Drama', 'Family', 'Fantasy', 'History',
@@ -23,11 +34,37 @@ VALID_GENRES = {
     'Thriller', 'War', 'Western',
 }
 
+# ── Language maps ─────────────────────────────────────────────────────────────
+_MOOD_LANG_HINTS = {
+    'bollywood': 'hi', 'hindi': 'hi', 'hindi film': 'hi',
+    'hindi movie': 'hi', 'desi': 'hi', 'indian movie': 'hi',
+    'south indian': 'south_asian_regional', 'tollywood': 'te',
+    'kollywood': 'ta', 'mollywood': 'ml',
+    'tamil': 'ta', 'telugu': 'te', 'malayalam': 'ml', 'kannada': 'kn',
+    'marathi': 'mr', 'bengali': 'bn', 'punjabi': 'pa',
+    'korean': 'ko', 'k-drama': 'ko', 'kdrama': 'ko', 'k drama': 'ko',
+    'japanese': 'ja', 'anime': 'ja',
+    'chinese': 'zh', 'mandarin': 'zh',
+    'hollywood': 'en', 'english': 'en', 'american': 'en', 'british': 'en',
+    'french': 'fr', 'spanish': 'es', 'italian': 'it',
+    'german': 'de', 'portuguese': 'pt',
+}
 
+_MOOD_LANG_GROUPS = {
+    'hi': 'south_asian', 'ta': 'south_asian', 'te': 'south_asian',
+    'ml': 'south_asian', 'kn': 'south_asian', 'bn': 'south_asian',
+    'mr': 'south_asian', 'pa': 'south_asian', 'ur': 'south_asian',
+    'en': 'western',     'fr': 'western',     'es': 'western',
+    'it': 'western',     'de': 'western',     'pt': 'western',
+    'zh': 'east_asian',  'ja': 'east_asian',  'ko': 'east_asian',
+}
+
+
+# ── Groq mood interpretation ──────────────────────────────────────────────────
 def groq_interpret_mood(mood: str) -> dict:
     """
     Groq interprets any mood string and returns matching genres + vibe + keywords.
-    Also returns a confidence score so we know when to fall back to llm_chat.
+    Returns a confidence score so we know when to fall back to llm_chat.
     """
     prompt = (
         f"A user wants movie recommendations. Their mood/feeling is: '{mood}'.\n"
@@ -35,44 +72,46 @@ def groq_interpret_mood(mood: str) -> dict:
         f"Return ONLY a JSON object, no explanation:\n"
         f"{{\n"
         f'  "genres": ["Genre1", "Genre2"],\n'
+        f'  "exclude_genres": ["Genre3"],\n'
         f'  "vibe": "one sentence describing the ideal movie for this mood",\n'
         f'  "keywords": ["keyword1", "keyword2", "keyword3", "keyword4", "keyword5"],\n'
         f'  "confidence": 0.0\n'
         f"}}\n\n"
         f"Rules:\n"
-        f"- confidence: 0.0-1.0. High (0.8+) if mood maps cleanly to genres. "
-        f"Low (<0.5) if mood is very specific, niche, adult, or hard to map to genres.\n"
-        f"- genres MUST only come from this exact list:\n"
+        f"- genres: 1-3 genres that best match the mood. MUST be from this list:\n"
         f"  Action, Adventure, Animation, Comedy, Crime, Documentary, Drama, "
         f"Family, Fantasy, History, Horror, Music, Mystery, Romance, "
         f"Science Fiction, Thriller, War, Western\n"
-        f"- keywords should capture tone, themes, and feeling (e.g. 'passionate', "
-        f"'heartwarming', 'suspenseful', 'steamy', 'dark', 'uplifting')\n"
-        f"- If the mood is adult/explicit/sexual in nature, set confidence below 0.5\n"
-        f"- If the mood mentions a specific director, actor, or year — confidence = 0.0"
+        f"- exclude_genres: genres to explicitly AVOID (e.g. if user says 'not romance' → ['Romance'])\n"
+        f"- keywords: SPECIFIC plot-level words found in movie overviews (NOT tone words).\n"
+        f"  e.g. 'girls night' → ['friendship', 'female', 'women', 'bonding', 'fun']\n"
+        f"  e.g. 'rainy sunday' → ['cozy', 'comfort', 'nostalgic', 'slow', 'heartwarming']\n"
+        f"  e.g. 'heartbroken' → ['breakup', 'grief', 'loss', 'loneliness', 'healing']\n"
+        f"- vibe: describe HOW the movie should feel, not what it's about\n"
+        f"- confidence: 0.8+ if mood maps cleanly. <0.5 if very niche or adult/explicit.\n"
+        f"- If mood mentions a specific director, actor, or year — confidence = 0.0"
     )
-    import time as _time
     for attempt in range(2):
         try:
-            resp = Groq(api_key=GROQ_API_KEY).chat.completions.create(
+            resp = _get_groq().chat.completions.create(
                 model='llama-3.3-70b-versatile',
                 messages=[{'role': 'user', 'content': prompt}],
                 temperature=0.1,
-                max_tokens=200,
+                max_tokens=250,
             )
             raw = resp.choices[0].message.content.strip()
             raw = re.sub(r'^```json?\s*', '', raw, flags=re.MULTILINE)
             raw = re.sub(r'```\s*$',      '', raw, flags=re.MULTILINE)
             result = json.loads(raw.strip())
             result['genres'] = [g for g in result.get('genres', []) if g in VALID_GENRES]
+            result['exclude_genres'] = [g for g in result.get('exclude_genres', []) if g in VALID_GENRES]
             result.setdefault('confidence', 0.8)
             result.setdefault('keywords', [])
             return result
         except Exception as e:
             err = str(e)
             if '429' in err and attempt == 0:
-                import re as _re2
-                m = _re2.search(r'try again in (\d+\.?\d*)s', err)
+                m = re.search(r'try again in (\d+\.?\d*)s', err)
                 wait = min(int(float(m.group(1))) + 1, 12) if m else 6
                 print(f'[mood] Rate limit — waiting {wait}s')
                 _time.sleep(wait)
@@ -82,6 +121,68 @@ def groq_interpret_mood(mood: str) -> dict:
     return None
 
 
+# ── Groq mood ranker ──────────────────────────────────────────────────────────
+def _groq_rank_mood(mood_str, vibe_str, candidates_df, top_n):
+    """
+    Groq picks the best emotional matches from the DB candidate pool.
+    Returns list of positional indices into candidates_df.
+    """
+    if not GROQ_API_KEY or GROQ_API_KEY == 'YOUR_GROQ_KEY_HERE':
+        return []
+
+    lines = []
+    for i, (_, row) in enumerate(candidates_df.iterrows(), 1):
+        try:
+            yr = int(row['year']) if row.get('year') is not None and not pd.isna(row['year']) else '?'
+        except (TypeError, ValueError):
+            yr = '?'
+        va  = float(row.get('vote_average', 0) or 0)
+        ov  = str(row.get('overview', '') or '')[:100].replace('\n', ' ')
+        gen = str(row.get('genres', '') or '')
+        lines.append(f'{i}. "{row["title"]}" ({yr}) | {gen} | ★{va:.1f} | {ov}')
+
+    prompt = (
+        f'A user wants movie recommendations for this mood: "{mood_str}"\n'
+        f'The ideal movie should feel like: {vibe_str}\n\n'
+        f'From this candidate list, pick the BEST {top_n} films.\n'
+        f'RANKING CRITERIA (in order of importance):\n'
+        f'1. Emotional fit — does the film actually match the mood/occasion?\n'
+        f'2. Tone match — funny=light/fun, sad=emotional, thriller=tense\n'
+        f'3. Quality — higher rated films preferred when vibe is equal\n'
+        f'4. Prefer feature films unless the mood specifically asks for documentaries or stand-up specials\n'
+        f'Return ONLY a JSON array of item numbers in ranked order, e.g. [3,7,1,9,5]\n'
+        f'No explanation. No markdown.\n\n'
+        + '\n'.join(lines)
+    )
+
+    for attempt in range(2):
+        try:
+            resp = _get_groq().chat.completions.create(
+                model='llama-3.3-70b-versatile',
+                messages=[{'role': 'user', 'content': prompt}],
+                temperature=0.1,
+                max_tokens=150,
+            )
+            raw = resp.choices[0].message.content.strip()
+            raw = re.sub(r'[^0-9,\[\]]', '', raw)
+            picks = json.loads(raw)
+            picks = [p - 1 for p in picks if isinstance(p, int) and 1 <= p <= len(candidates_df)]
+            print(f'[mood] Groq ranked: {picks[:top_n]}')
+            return picks[:top_n]
+        except Exception as e:
+            err = str(e)
+            if '429' in err and attempt == 0:
+                m = re.search(r'try again in (\d+\.?\d*)s', err)
+                wait = min(int(float(m.group(1))) + 1, 12) if m else 6
+                print(f'[mood] Rate limit — waiting {wait}s')
+                _time.sleep(wait)
+            else:
+                print(f'[mood] Groq rank failed: {err[:80]}')
+                return []
+    return []
+
+
+# ── Main function ─────────────────────────────────────────────────────────────
 def mood_based_recommend(mood: str, top_n: int = 10,
                          era: str = None, min_votes: int = 500,
                          refine: str = None,
@@ -92,31 +193,27 @@ def mood_based_recommend(mood: str, top_n: int = 10,
     to route to llm_chat instead.
     """
     global LAST_SESSION
-    _size_before = len(df)
+    _size_before   = len(df)
     genres_exclude = []
 
-    # ── Handle refine= ────────────────────────────────────────────────────────
+    # ── Handle refine ─────────────────────────────────────────────────────────
     if refine:
         if not LAST_SESSION['query']:
             return None, "No previous session to refine."
-
         print(f"[mood] Refining: '{refine}'")
         parsed         = groq_parse_refinement(refine, LAST_SESSION)
         action         = parsed.get('action', 'more')
         genres_exclude = parsed.get('genres_exclude') or []
-
         if action == 'new_mood':
             mood = parsed.get('new_mood') or refine
             print(f"[mood] New mood: '{mood}'")
         else:
             mood = LAST_SESSION['query']
-
         exclude_titles = list(LAST_SESSION['shown']) + (exclude_titles or [])
         era            = era or LAST_SESSION.get('era')
         min_votes      = LAST_SESSION.get('min_votes', 500)
         top_n          = LAST_SESSION.get('top_n', top_n)
-        print(f"[mood] Re-running mood='{mood}' "
-              f"excluding {len(exclude_titles)} shown titles")
+        print(f"[mood] Re-running mood='{mood}' excluding {len(exclude_titles)} shown titles")
 
     # ── Groq interprets mood ──────────────────────────────────────────────────
     print(f"[mood] Interpreting '{mood}'...")
@@ -125,17 +222,18 @@ def mood_based_recommend(mood: str, top_n: int = 10,
         persist_if_new(_size_before)
         return None, f"Could not interpret '{mood}'. Check Groq API key."
 
-    target_genres = result.get('genres', [])
-    confidence    = result.get('confidence', 0.8)
-    match_all     = is_compound_mood(mood)
-    vibe          = result.get('vibe', '')
-    keywords      = [k.lower() for k in result.get('keywords', [])]
+    target_genres  = result.get('genres', [])
+    exclude_genres = result.get('exclude_genres', []) + genres_exclude
+    confidence     = result.get('confidence', 0.8)
+    match_all      = is_compound_mood(mood)
+    vibe           = result.get('vibe', '')
+    keywords       = [k.lower() for k in result.get('keywords', [])]
 
-    print(f"[mood] genres={target_genres}  confidence={confidence}  match_all={match_all}")
+    print(f"[mood] genres={target_genres}  exclude={exclude_genres}  confidence={confidence}")
     print(f"[mood] vibe: {vibe}")
     print(f"[mood] keywords: {keywords}")
 
-    # ── Low confidence → signal agent to use llm_chat ─────────────────────────
+    # ── Low confidence → LLM fallback ────────────────────────────────────────
     if confidence < 0.5 or not target_genres:
         print(f"[mood] Low confidence ({confidence}) — signalling LLM fallback")
         persist_if_new(_size_before)
@@ -150,7 +248,7 @@ def mood_based_recommend(mood: str, top_n: int = 10,
 
     top2      = {g.lower() for g in target_genres[:2]}
     tnorm     = {g.lower() for g in target_genres}
-    excl_norm = {g.lower() for g in genres_exclude}
+    excl_norm = {g.lower() for g in exclude_genres}
 
     def matches(gl):
         if not isinstance(gl, list): return False
@@ -178,24 +276,9 @@ def mood_based_recommend(mood: str, top_n: int = 10,
             break
 
     if results.empty:
-        persist_if_new(_size_before)
-        # No genre matches at all — fall back to LLM
         print(f"[mood] No results after all thresholds — signalling LLM fallback")
+        persist_if_new(_size_before)
         return None, 'LLM_FALLBACK'
-
-    # ── Adult content guard ──────────────────────────────────────────────────
-    _ADULT_KEYWORDS = {
-        'sensual', 'erotic', 'sexy', 'steamy', 'adult', 'explicit',
-        'sexual', 'nude', 'bold', 'hot scenes', 'nsfw', 'erotica',
-    }
-    mood_lower = mood.lower()
-    if any(kw in mood_lower for kw in _ADULT_KEYWORDS):
-        print("[mood] Adult keyword detected — sanitizing mood")
-        mood = re.sub(
-            r'\b(sensual|erotic|sexy|steamy|explicit|sexual|bold|hot|nude|nsfw)\b',
-            'passionate', mood_lower
-        ).strip()
-        print(f"[mood] Sanitized mood: '{mood}'")
 
     # ── Exclude shown titles ──────────────────────────────────────────────────
     if exclude_titles:
@@ -203,62 +286,64 @@ def mood_based_recommend(mood: str, top_n: int = 10,
         results = results[~results['title_clean'].isin(excl)]
 
     # ── Language filter ───────────────────────────────────────────────────────
-    _MOOD_LANG_HINTS = {
-        'bollywood': 'hi', 'hindi': 'hi', 'desi': 'hi', 'indian movie': 'hi',
-        'south indian': 'south_asian_regional',
-        'tollywood': 'te', 'kollywood': 'ta', 'mollywood': 'ml',
-        'tamil': 'ta', 'telugu': 'te', 'malayalam': 'ml', 'kannada': 'kn',
-        'korean': 'ko', 'k-drama': 'ko', 'kdrama': 'ko',
-        'japanese': 'ja', 'anime': 'ja',
-        'chinese': 'zh', 'mandarin': 'zh',
-        'hollywood': 'en', 'english': 'en', 'american': 'en', 'british': 'en',
-        'french': 'fr', 'spanish': 'es', 'italian': 'it', 'german': 'de',
-    }
-    _MOOD_LANG_GROUPS = {
-        'hi': 'south_asian', 'ta': 'south_asian', 'te': 'south_asian',
-        'ml': 'south_asian', 'kn': 'south_asian', 'bn': 'south_asian',
-        'en': 'western',     'fr': 'western',     'es': 'western',
-        'it': 'western',     'de': 'western',     'pt': 'western',
-        'zh': 'east_asian',  'ja': 'east_asian',  'ko': 'east_asian',
-    }
+    mood_lower    = mood.lower()
     detected_lang = None
     for hint, lang_code in _MOOD_LANG_HINTS.items():
         if hint in mood_lower:
             detected_lang = lang_code
             break
+
     if detected_lang is None and LAST_SESSION.get('query_lang'):
         detected_lang = LAST_SESSION['query_lang']
+        print(f"[mood] No lang hint — using session lang: {detected_lang}")
 
     if 'original_language' in results.columns:
-        lang_col = results['original_language'].astype(str).str.lower().str.strip()
+        lang_col  = results['original_language'].astype(str).str.lower().str.strip()
+        min_needed = max(top_n // 2, 3)
+
         if detected_lang == 'south_asian_regional':
             filt = lang_col.isin(['ta', 'te', 'ml', 'kn'])
-            if filt.sum() >= top_n:
+            if filt.sum() >= min_needed:
                 results = results[filt]
+                print(f'[mood] Lang filter: south_asian_regional ({filt.sum()})')
+
         elif detected_lang == 'en':
             filt = lang_col == 'en'
-            if filt.sum() >= top_n:
+            if filt.sum() >= min_needed:
                 results = results[filt]
+                print(f'[mood] Lang filter: english only ({filt.sum()})')
+
         elif detected_lang:
-            filt = lang_col.isin([detected_lang, 'en'])
-            if filt.sum() >= top_n:
-                results = results[filt]
+            # Try exact language first
+            filt_exact = lang_col == detected_lang
+            if filt_exact.sum() >= min_needed:
+                results = results[filt_exact]
+                print(f'[mood] Lang filter: exact={detected_lang} ({filt_exact.sum()})')
             else:
-                grp = _MOOD_LANG_GROUPS.get(detected_lang, 'other')
-                filt2 = lang_col.apply(lambda l: l == 'en' or _MOOD_LANG_GROUPS.get(l, 'other') == grp)
-                if filt2.sum() >= top_n:
-                    results = results[filt2]
+                # Fall back to language + English
+                filt = lang_col.isin([detected_lang, 'en'])
+                if filt.sum() >= min_needed:
+                    results = results[filt]
+                    print(f'[mood] Lang filter: {detected_lang}+en ({filt.sum()})')
+                else:
+                    grp = _MOOD_LANG_GROUPS.get(detected_lang, 'other')
+                    filt2 = lang_col.apply(lambda l: l == 'en' or _MOOD_LANG_GROUPS.get(l, 'other') == grp)
+                    if filt2.sum() >= min_needed:
+                        results = results[filt2]
+                        print(f'[mood] Lang filter: group={grp} ({filt2.sum()})')
+
         print(f"[mood] Lang filter: detected={detected_lang} results={len(results)}")
 
     # ── Keyword boost scoring ─────────────────────────────────────────────────
     def keyword_boost(row):
-        """Score how well a movie's text matches the mood keywords."""
         if not keywords:
             return 0.0
         text = ' '.join([
-            str(row.get('overview',     '') or ''),
-            str(row.get('tagline',      '') or ''),
-            str(row.get('keyword_str',  '') or ''),
+            str(row.get('title',       '') or ''),
+            str(row.get('overview',    '') or ''),
+            str(row.get('tagline',     '') or ''),
+            str(row.get('keyword_str', '') or '') if 'keyword_str' in df.columns else '',
+            str(row.get('keywords',    '') or ''),
         ]).lower()
         hits = sum(1 for kw in keywords if kw in text)
         return hits / len(keywords)
@@ -271,27 +356,36 @@ def mood_based_recommend(mood: str, top_n: int = 10,
         bonus = 0.2 if gl[0].lower().strip() in tnorm else 0.0
         return score + bonus
 
-    results['spec']    = results['genre_list'].apply(specificity)
+    results['spec']     = results['genre_list'].apply(specificity)
     results['kw_boost'] = results.apply(keyword_boost, axis=1)
 
-    if 'weighted_score' in results.columns:
-        ws      = pd.to_numeric(results['weighted_score'], errors='coerce').fillna(0)
-        ws_min  = ws.min()
-        ws_max  = ws.max()
-        results['qual'] = (ws - ws_min) / (ws_max - ws_min + 1e-9)
-    else:
-        # Fallback: use vote_average × log(vote_count) as quality proxy
-        import numpy as _np
+    # Quality score
+    try:
         _va2 = pd.to_numeric(results['vote_average'], errors='coerce').fillna(0)
         _vc2 = pd.to_numeric(results['vote_count'],   errors='coerce').fillna(1).clip(lower=1)
-        proxy = _va2 * _np.log10(_vc2)
+        proxy = _va2 * np.log10(_vc2)
         results['qual'] = (proxy - proxy.min()) / (proxy.max() - proxy.min() + 1e-9)
+    except Exception:
+        results['qual'] = 0.5
 
-    # Weights: specificity 25%, quality 50%, keyword boost 25%
+    # Language boost
+    if detected_lang and detected_lang not in ('en', None):
+        lang_col2 = results['original_language'].astype(str).str.lower().str.strip() \
+                    if 'original_language' in results.columns else None
+        if lang_col2 is not None:
+            results['lang_boost'] = lang_col2.apply(
+                lambda l: 0.3 if l == detected_lang else 0.0
+            )
+        else:
+            results['lang_boost'] = 0.0
+    else:
+        results['lang_boost'] = 0.0
+
     results['final_score'] = (
-        results['spec']     * 0.25 +
-        results['qual']     * 0.50 +
-        results['kw_boost'] * 0.25
+        results['spec']       * 0.20 +
+        results['qual']       * 0.40 +
+        results['kw_boost']   * 0.20 +
+        results['lang_boost'] * 0.20
     )
     results = results.sort_values('final_score', ascending=False)
 
@@ -299,7 +393,17 @@ def mood_based_recommend(mood: str, top_n: int = 10,
     results['_fr'] = results['title'].apply(franchise_key)
     results = results.drop_duplicates('_fr', keep='first').drop(columns='_fr')
 
-    final = results.head(top_n)
+    # ── Groq ranking — pick best emotional matches from top pool ─────────────
+    top_pool = results.head(max(top_n * 3, 20))
+    if GROQ_API_KEY and GROQ_API_KEY != 'YOUR_GROQ_KEY_HERE' and len(top_pool) >= top_n:
+        picks = _groq_rank_mood(mood, vibe, top_pool, top_n)
+        if picks:
+            final = top_pool.iloc[picks].head(top_n)
+            print(f'[mood] Groq selected {len(final)} films')
+        else:
+            final = results.head(top_n)
+    else:
+        final = results.head(top_n)
 
     # ── Save session state ────────────────────────────────────────────────────
     LAST_SESSION.update({
