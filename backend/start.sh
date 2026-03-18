@@ -7,6 +7,8 @@ REQUIRED_FILES=(
     "tfidf_vectorizer.joblib"
     "tfidf_matrix.joblib"
     "title_to_idx.joblib"
+    "faiss_index.index"
+    "embed_matrix.npy"
 )
 
 echo "[startup] Checking artifacts at $ARTIFACTS_DIR..."
@@ -38,6 +40,8 @@ files = [
     "tfidf_vectorizer.joblib",
     "tfidf_matrix.joblib",
     "title_to_idx.joblib",
+    "faiss_index.index",
+    "embed_matrix.npy",
 ]
 for fname in files:
     print(f"  -> {fname}", flush=True)

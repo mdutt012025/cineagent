@@ -11,3 +11,4 @@ requests
 python-dotenv
 scipy
 huggingface_hub
+faiss-cpu

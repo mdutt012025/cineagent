@@ -11,6 +11,19 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / '.env')
 
 from fastapi import FastAPI, HTTPException
+import math
+
+def sanitize(obj):
+    """Replace NaN/Inf floats so JSON serialization never fails."""
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [sanitize(i) for i in obj]
+    return obj
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -30,7 +43,7 @@ from tools import (
 
 app = FastAPI(
     title       = "CineAgent API",
-    description = "Movie recommendation engine powered by FAISS / TF-IDF + Groq LLM",
+    description = "Movie recommendation engine powered by TF-IDF + Groq LLM",
     version     = "2.0.0",
 )
 
@@ -99,23 +112,6 @@ def health():
     """Health check — confirms API is running."""
     return {"status": "ok", "service": "CineAgent API", "version": "2.0.0"}
 
-@app.get("/")
-def home():
-    return {
-        "status": "ok",
-        "app": "CineAgent",
-        "version": "2.0.0",
-        "endpoints": {
-            "docs": "/docs",
-            "health": "/health",
-            "recommend": "/recommend",
-            "mood": "/mood",
-            "compare": "/compare",
-            "gems": "/gems",
-            "agent": "/vibe",
-            "llm_chat": "/llm_chat"
-        }
-    }
 
 @app.post("/recommend")
 def recommend(req: VibeRequest):
@@ -139,7 +135,7 @@ def recommend(req: VibeRequest):
         return {"status": "error", "results": None, "options": None, "error": err}
     return {
         "status":  "disambig" if err and err.startswith('DISAMBIG') else "ok",
-        "results": result,
+        "results": sanitize(result),
         "options": options,
         "error":   err,
     }
@@ -210,7 +206,7 @@ def llm_chat(req: LLMChatRequest):
         raise HTTPException(status_code=500, detail=err)
     return {
         "status":  "ok",
-        "results": result,
+        "results": sanitize(result),
         "history_length": len(get_chat_history()),
     }
 
