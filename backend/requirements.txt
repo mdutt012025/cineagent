@@ -10,3 +10,4 @@ pyarrow
 requests
 python-dotenv
 scipy
+huggingface_hub

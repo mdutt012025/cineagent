@@ -13,8 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from sklearn.metrics.pairwise import cosine_similarity
 
-BASE_DIR      = Path(__file__).resolve().parent.parent.parent
-ARTIFACTS_DIR = BASE_DIR / 'model_artifacts'
+BASE_DIR      = Path("/app")
+ARTIFACTS_DIR = Path("/app/model_artifacts")
 
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY', 'YOUR_GROQ_KEY_HERE')
 TMDB_API_KEY = os.environ.get('TMDB_API_KEY', 'YOUR_TMDB_KEY_HERE')

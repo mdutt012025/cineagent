@@ -30,7 +30,7 @@ from tools import (
 
 app = FastAPI(
     title       = "CineAgent API",
-    description = "Movie recommendation engine powered by TF-IDF + Groq LLM",
+    description = "Movie recommendation engine powered by FAISS / TF-IDF + Groq LLM",
     version     = "2.0.0",
 )
 
@@ -99,6 +99,23 @@ def health():
     """Health check — confirms API is running."""
     return {"status": "ok", "service": "CineAgent API", "version": "2.0.0"}
 
+@app.get("/")
+def home():
+    return {
+        "status": "ok",
+        "app": "CineAgent",
+        "version": "2.0.0",
+        "endpoints": {
+            "docs": "/docs",
+            "health": "/health",
+            "recommend": "/recommend",
+            "mood": "/mood",
+            "compare": "/compare",
+            "gems": "/gems",
+            "agent": "/vibe",
+            "llm_chat": "/llm_chat"
+        }
+    }
 
 @app.post("/recommend")
 def recommend(req: VibeRequest):
