@@ -432,6 +432,42 @@ def inject_movie(meta, save=True):
     new_idx      = len(df) - 1
 
     title_to_idx[title_clean] = new_idx
+    try:
+        if faiss_index is not None:
+        # Build a content string for the new row the same way generate_embeddings.py does.
+        # Use the same soup field that was fed to tfidf — already in new_row['content_soup'].
+        from sentence_transformers import SentenceTransformer as _ST
+        import numpy as _np
+
+        _model = getattr(inject_movie, '_embed_model', None)
+        if _model is None:
+            # Cache the model on the function so we only load it once per process.
+            inject_movie._embed_model = _ST('all-MiniLM-L6-v2')
+            _model = inject_movie._embed_model
+
+        text_to_embed = str(new_row.get('content_soup', '') or
+                            new_row.get('overview', '') or
+                            new_row.get('title', ''))
+        new_vec = _model.encode([text_to_embed], normalize_embeddings=True)  # shape (1, 384)
+        new_vec = new_vec.astype('float32')
+
+        faiss_index.add(new_vec)           # now faiss_index.ntotal == len(df)
+
+        # Also extend embed_matrix so future numpy-path calls stay in sync
+        if embed_matrix is not None:
+            import numpy as _np2
+            embed_matrix_updated = _np2.vstack([embed_matrix, new_vec])
+            # Rebind the module-level name — same pattern as df reassignment
+            import backend.tools.shared as _shared
+            _shared.embed_matrix = embed_matrix_updated
+
+        print('[inject] FAISS index updated: ntotal={}'.format(faiss_index.ntotal))
+
+    except Exception as _e:
+    # Non-fatal: FAISS update failed but the film is still in df/tfidf.
+    # build_candidate_pool will detect the mismatch and fall back to TF-IDF.
+        print('[inject] FAISS update skipped: {}'.format(_e))
+        
     _INJECTED_THIS_SESSION.add(title_clean)
 
     print("[inject] '{}' ({}) ★{:.1f} added — total {:,}".format(

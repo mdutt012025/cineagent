@@ -352,7 +352,7 @@ def groq_suggest_and_score(query_title, query_row, n=20, exclude_titles=None, er
     qc         = re.sub(r'[^a-z0-9 ]', '', query_title.lower().strip())
     matrix_pos = title_to_idx.get(qc)
     ref_titles = []
-    if matrix_pos is not None:
+    if matrix_pos is not None and matrix_pos < tfidf_matrix.shape[0]:
         sim    = cosine_similarity(tfidf_matrix[matrix_pos], tfidf_matrix).flatten()
         top200 = sim.argsort()[::-1][1:200]
         famous = sorted(
@@ -813,11 +813,42 @@ def build_candidate_pool(query_idx, query_clean, query_row, exclude_titles,
     matrix_pos = title_to_idx.get(q_clean) or title_to_idx.get(query_clean)
     sim_scores = None
     top_idx    = None
+    q_vec      = None
 
     if faiss_index is not None and matrix_pos is not None:
-        # FAISS path: IndexFlatIP returns cosine similarity directly (vectors pre-normalized)
         try:
-            q_vec = embed_matrix[matrix_pos].reshape(1, -1).astype('float32') if embed_matrix is not None                     else None
+            # Guard: injected films may not yet be in FAISS (added after index was built).
+            # faiss_index.ntotal is the authoritative count of indexed vectors.
+            if matrix_pos >= faiss_index.ntotal:
+                print('[pool] FAISS skip: matrix_pos={} >= faiss ntotal={} '
+                      '(injected film — falling back to TF-IDF)'.format(
+                          matrix_pos, faiss_index.ntotal))
+                sim_scores = None
+                top_idx    = None
+            else:
+                # Normal path — film is in FAISS
+                if embed_matrix is not None and matrix_pos < len(embed_matrix):
+                    q_vec = embed_matrix[matrix_pos].reshape(1, -1).astype('float32')
+                else:
+                    # embed_matrix not loaded in memory — read just this row from disk
+                    import numpy as _np2
+                    _em   = _np2.load(str(ARTIFACTS_DIR / 'embed_matrix.npy'), mmap_mode='r')
+                    q_vec = _em[matrix_pos].reshape(1, -1).astype('float32')
+
+                scores, indices = faiss_index.search(q_vec, 1001)
+                top_idx         = indices[0]
+                sim_scores_arr  = scores[0]
+
+                sim_scores = np.zeros(len(df), dtype=np.float32)
+                valid = (top_idx >= 0) & (top_idx < len(df))
+                sim_scores[top_idx[valid]] = sim_scores_arr[valid]
+                top_idx = top_idx[valid][1:]   # skip self
+                print('[pool] FAISS search: top {} candidates'.format(len(top_idx)))
+
+        except Exception as e:
+            print('[pool] FAISS search failed: {} — falling back'.format(e))
+            sim_scores = None
+            top_idx    = None
             if q_vec is None:
                 # embed_matrix not loaded but FAISS is — load just this vector
                 import numpy as _np2
@@ -832,10 +863,6 @@ def build_candidate_pool(query_idx, query_clean, query_row, exclude_titles,
             sim_scores[top_idx[valid]] = sim_scores_arr[valid]
             top_idx = top_idx[valid][1:]             # skip self (rank 0)
             print('[pool] FAISS search: top {} candidates'.format(len(top_idx)))
-        except Exception as e:
-            print('[pool] FAISS search failed: {} — falling back'.format(e))
-            sim_scores = None
-            top_idx    = None
 
     if sim_scores is None and embed_matrix is not None and matrix_pos is not None:
         # Numpy cosine path
@@ -845,8 +872,7 @@ def build_candidate_pool(query_idx, query_clean, query_row, exclude_titles,
         print('[pool] Numpy embedding search')
 
     if sim_scores is None:
-        # TF-IDF fallback
-        if matrix_pos is None:
+        if matrix_pos is None or matrix_pos >= tfidf_matrix.shape[0]:
             return pd.DataFrame()
         sim_scores = cosine_similarity(tfidf_matrix[matrix_pos], tfidf_matrix).flatten()
         top_idx    = np.argsort(sim_scores)[::-1][1:1001]
@@ -1643,7 +1669,8 @@ def enrich_if_sparse(query_row: dict, title: str, year=None) -> dict:
                     (isinstance(existing_genres, list) and len(existing_genres) == 0) or
                     str(existing_genres).strip() in ('', 'nan', 'none', '[]'))
         if is_empty:
-            genre_list = enriched['genres'] if isinstance(enriched['genres'], list)                          else [g.strip() for g in str(enriched['genres']).split(',') if g.strip()]
+            genre_list = enriched['genres'] if isinstance(enriched['genres'], list) \
+                         else [g.strip() for g in str(enriched['genres']).split(',') if g.strip()]
             patch['genre_list'] = genre_list
             patch['genres']     = ', '.join(genre_list)
 
@@ -2114,7 +2141,7 @@ def recommend_by_vibe(query_title, top_n=5, exclude_titles=None,
             rows = rows[:top_n]
             print('[vibe] After native guarantee: {}'.format([r.get('title') for r in rows]))
 
-    # ── Build output ──────────────────────────────────────────────────────────
+    # ── Build output final ──────────────────────────────────────────────────────────
     final    = pd.DataFrame(rows[:top_n])
     out_cols = ['title', 'year', 'genres', 'vote_average', 'overview', 'director', 'poster_url']
     out_cols = [c for c in out_cols if c in final.columns]

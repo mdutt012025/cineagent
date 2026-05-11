@@ -5,6 +5,7 @@
 
 import re
 import json
+import math
 import time as _time
 import pandas as pd
 import numpy as np
@@ -364,7 +365,19 @@ def mood_based_recommend(mood: str, top_n: int = 10,
         _va2 = pd.to_numeric(results['vote_average'], errors='coerce').fillna(0)
         _vc2 = pd.to_numeric(results['vote_count'],   errors='coerce').fillna(1).clip(lower=1)
         proxy = _va2 * np.log10(_vc2)
-        results['qual'] = (proxy - proxy.min()) / (proxy.max() - proxy.min() + 1e-9)
+        
+        # Replace any NaN or inf values in proxy
+        proxy = proxy.replace([np.inf, -np.inf], np.nan).fillna(0)
+        
+        # Safe normalization - check if there's any variance
+        proxy_min = proxy.min()
+        proxy_max = proxy.max()
+        proxy_range = proxy_max - proxy_min
+        
+        if proxy_range > 1e-6:  # Has meaningful variance
+            results['qual'] = (proxy - proxy_min) / proxy_range
+        else:  # All values are the same or too close
+            results['qual'] = 0.5
     except Exception:
         results['qual'] = 0.5
 
@@ -420,4 +433,19 @@ def mood_based_recommend(mood: str, top_n: int = 10,
     persist_if_new(_size_before)
 
     cols = ['title', 'year', 'genres', 'vote_average', 'vote_count', 'overview', 'director', 'poster_url']
-    return final[[c for c in cols if c in final.columns]].to_dict('records'), None
+    result_dict = final[[c for c in cols if c in final.columns]].to_dict('records')
+    
+    # Final safety check: Replace any remaining NaN/inf values with None
+    def make_json_safe(obj):
+        """Recursively clean NaN and inf values from nested structures"""
+        if isinstance(obj, float):
+            if math.isnan(obj) or math.isinf(obj):
+                return None
+            return obj
+        elif isinstance(obj, dict):
+            return {k: make_json_safe(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [make_json_safe(item) for item in obj]
+        return obj
+    
+    return make_json_safe(result_dict), None
